@@ -13,6 +13,8 @@ type Stream struct {
 	consumers []core.Consumer
 	mu        sync.Mutex
 	pending   atomic.Int32
+	// Lookback buffer for recording (works with any stream type)
+	lookback *LookbackBuffer
 }
 
 func NewStream(source any) *Stream {
@@ -70,6 +72,24 @@ func (s *Stream) RemoveConsumer(cons core.Consumer) {
 			s.consumers = append(s.consumers[:i], s.consumers[i+1:]...)
 			break
 		}
+	}
+
+	// Stop lookback buffer if no regular consumers remain
+	// (exclude the lookback consumer itself from count)
+	regularConsumers := len(s.consumers)
+	if s.lookback != nil && s.lookback.consumer != nil {
+		for _, c := range s.consumers {
+			if c == s.lookback.consumer {
+				regularConsumers--
+				break
+			}
+		}
+	}
+	if regularConsumers == 0 && s.lookback != nil {
+		// Unlock before calling stopLookbackBuffer (it needs to lock)
+		s.mu.Unlock()
+		s.stopLookbackBuffer()
+		s.mu.Lock()
 	}
 	s.mu.Unlock()
 

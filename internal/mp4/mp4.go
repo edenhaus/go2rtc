@@ -2,6 +2,7 @@ package mp4
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -97,6 +98,14 @@ func handlerMP4(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Start lookback buffer if requested and not already active
+	lookback := core.Atoi(query.Get("lookback"))
+	if lookback > 0 && !stream.HasLookbackBuffer() {
+		if err := stream.StartLookbackBuffer(); err != nil {
+			log.Warn().Err(err).Msg("[mp4] failed to start lookback buffer")
+		}
+	}
+
 	medias := mp4.ParseQuery(r.URL.Query())
 	cons := mp4.NewConsumer(medias)
 	cons.FormatName = "mp4"
@@ -142,5 +151,43 @@ func handlerMP4(w http.ResponseWriter, r *http.Request) {
 		stream.RemoveConsumer(cons)
 	}()
 
+	// Handle lookback parameter - inject buffered data
+	if lookback > 0 {
+		_, lookbackData := stream.GetLookbackData(lookback)
+		if len(lookbackData) > 0 {
+			log.Debug().Msgf("[mp4] using %d bytes of lookback data", len(lookbackData))
+			wrapper := &lookbackWriter{
+				writer:       w,
+				lookbackData: lookbackData,
+			}
+			_, _ = cons.WriteTo(wrapper)
+			return
+		}
+	}
+
 	_, _ = cons.WriteTo(w)
+}
+
+// lookbackWriter intercepts the first write (init segment) and injects lookback data after it
+type lookbackWriter struct {
+	writer       io.Writer
+	lookbackData []byte
+	firstWrite   bool
+}
+
+func (lw *lookbackWriter) Write(p []byte) (n int, err error) {
+	if !lw.firstWrite {
+		lw.firstWrite = true
+		// Write the init segment
+		if n, err = lw.writer.Write(p); err != nil {
+			return n, err
+		}
+		// Inject lookback segment data after init
+		if _, err = lw.writer.Write(lw.lookbackData); err != nil {
+			return n, err
+		}
+		return n, nil
+	}
+	// Pass through subsequent writes
+	return lw.writer.Write(p)
 }
