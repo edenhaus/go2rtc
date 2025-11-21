@@ -98,14 +98,6 @@ func handlerMP4(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start lookback buffer if requested and not already active
-	lookback := core.Atoi(query.Get("lookback"))
-	if lookback > 0 && !stream.HasLookbackBuffer() {
-		if err := stream.StartLookbackBuffer(); err != nil {
-			log.Warn().Err(err).Msg("[mp4] failed to start lookback buffer")
-		}
-	}
-
 	medias := mp4.ParseQuery(r.URL.Query())
 	cons := mp4.NewConsumer(medias)
 	cons.FormatName = "mp4"
@@ -152,8 +144,9 @@ func handlerMP4(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Handle lookback parameter - inject buffered data
+	lookback := core.Atoi(query.Get("lookback"))
 	if lookback > 0 {
-		_, lookbackData := stream.GetLookbackData(lookback)
+		_, lookbackData := streams.GetLookbackData(stream, lookback)
 		if len(lookbackData) > 0 {
 			log.Debug().Msgf("[mp4] using %d bytes of lookback data", len(lookbackData))
 			wrapper := &lookbackWriter{

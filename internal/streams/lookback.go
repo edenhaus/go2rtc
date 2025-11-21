@@ -1,12 +1,18 @@
 package streams
 
 import (
+	"errors"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/mp4"
 )
+
+// Global lookback registry (similar to preloads)
+var lookbacks = map[*Stream]*LookbackBuffer{}
+var lookbacksMu sync.Mutex
 
 // segmentData stores a video segment with timestamp
 type segmentData struct {
@@ -16,11 +22,11 @@ type segmentData struct {
 
 // LookbackBuffer maintains a ring buffer of recent video segments
 type LookbackBuffer struct {
-	init        []byte          // MP4 init segment (ftyp + moov)
-	segments    []segmentData   // Ring buffer of mdat segments
-	segmentIdx  int             // Current write position in ring buffer
-	maxSegments int             // Maximum segments to keep
-	consumer    core.Consumer   // Background consumer writing to buffer
+	init        []byte        // MP4 init segment (ftyp + moov)
+	segments    []segmentData // Ring buffer of mdat segments
+	segmentIdx  int           // Current write position in ring buffer
+	maxSegments int           // Maximum segments to keep
+	consumer    core.Consumer // Background consumer writing to buffer
 	mu          sync.Mutex
 }
 
@@ -99,81 +105,84 @@ func (lb *LookbackBuffer) GetData(seconds int) (init []byte, data []byte) {
 	return lb.init, buffer
 }
 
-// StartLookbackBuffer starts a background MP4 consumer for buffering
-func (s *Stream) StartLookbackBuffer() error {
-	s.mu.Lock()
-	if s.lookback != nil {
-		s.mu.Unlock()
-		return nil // Already started
+// AddLookback starts lookback buffering for a stream
+func AddLookback(stream *Stream, seconds string) error {
+	maxSeconds := 30 // default
+	if seconds != "" {
+		if s, err := strconv.Atoi(seconds); err == nil && s > 0 {
+			maxSeconds = s
+		}
 	}
 
-	// Create lookback buffer (default 30 seconds)
-	s.lookback = NewLookbackBuffer(30)
+	lookbacksMu.Lock()
+	defer lookbacksMu.Unlock()
+
+	// Remove existing lookback if present
+	if lb := lookbacks[stream]; lb != nil {
+		if lb.consumer != nil {
+			stream.RemoveConsumer(lb.consumer)
+		}
+		delete(lookbacks, stream)
+	}
+
+	// Create new lookback buffer
+	lb := NewLookbackBuffer(maxSeconds)
 
 	// Create MP4 consumer that writes to the buffer
 	cons := mp4.NewConsumer(nil) // nil = default codecs (H264/H265 + AAC)
 	cons.FormatName = "mp4/lookback"
-	s.lookback.consumer = cons
-	s.mu.Unlock()
+	lb.consumer = cons
 
-	// Add consumer (this will start producers if needed)
-	// Must be done without holding lock to avoid deadlock
-	if err := s.AddConsumer(cons); err != nil {
-		s.mu.Lock()
-		s.lookback = nil
-		s.mu.Unlock()
+	// Add consumer to stream (this will start producers if needed)
+	if err := stream.AddConsumer(cons); err != nil {
 		return err
 	}
 
+	// Register in global map
+	lookbacks[stream] = lb
+
 	// Start writing to buffer in background
 	go func() {
-		_, _ = cons.WriteTo(s.lookback)
+		_, _ = cons.WriteTo(lb)
 	}()
 
-	log.Debug().Msg("[streams] started lookback buffer")
+	log.Debug().Msgf("[streams] started lookback buffer (%ds)", maxSeconds)
 	return nil
 }
 
-// stopLookbackBuffer stops the background buffering consumer
-func (s *Stream) stopLookbackBuffer() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// DelLookback stops lookback buffering for a stream
+func DelLookback(stream *Stream) error {
+	lookbacksMu.Lock()
+	defer lookbacksMu.Unlock()
 
-	if s.lookback == nil {
-		return
-	}
-
-	if s.lookback.consumer != nil {
-		_ = s.lookback.consumer.Stop()
-		// Remove from consumers list
-		for i, cons := range s.consumers {
-			if cons == s.lookback.consumer {
-				s.consumers = append(s.consumers[:i], s.consumers[i+1:]...)
-				break
-			}
+	if lb := lookbacks[stream]; lb != nil {
+		if lb.consumer != nil {
+			stream.RemoveConsumer(lb.consumer)
 		}
+		delete(lookbacks, stream)
+		log.Debug().Msg("[streams] stopped lookback buffer")
+		return nil
 	}
 
-	s.lookback = nil
-	log.Debug().Msg("[streams] stopped lookback buffer")
+	return errors.New("streams: lookback not found")
 }
 
-// GetLookbackData retrieves buffered data from the stream
-func (s *Stream) GetLookbackData(seconds int) (init []byte, data []byte) {
-	s.mu.Lock()
-	lb := s.lookback
-	s.mu.Unlock()
+// Lookback is a convenience wrapper for AddLookback
+func Lookback(stream *Stream, seconds string) {
+	if err := AddLookback(stream, seconds); err != nil {
+		log.Error().Err(err).Caller().Send()
+	}
+}
+
+// GetLookbackData retrieves buffered data from a stream
+func GetLookbackData(stream *Stream, seconds int) (init []byte, data []byte) {
+	lookbacksMu.Lock()
+	lb := lookbacks[stream]
+	lookbacksMu.Unlock()
 
 	if lb == nil {
 		return nil, nil
 	}
 
 	return lb.GetData(seconds)
-}
-
-// HasLookbackBuffer returns true if lookback buffering is active
-func (s *Stream) HasLookbackBuffer() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lookback != nil
 }

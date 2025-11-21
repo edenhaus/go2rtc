@@ -177,6 +177,49 @@ func apiPreload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func apiLookback(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	src := query.Get("src")
+
+	// check if stream exists
+	stream := Get(src)
+	if stream == nil {
+		http.Error(w, "", http.StatusNotFound)
+		return
+	}
+
+	switch r.Method {
+	case "PUT":
+		// Get seconds parameter (default 30)
+		seconds := query.Get("seconds")
+		if seconds == "" {
+			seconds = "30"
+		}
+
+		if err := AddLookback(stream, seconds); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err := app.PatchConfig([]string{"lookback", src}, seconds); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+	case "DELETE":
+		if err := DelLookback(stream); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		if err := app.PatchConfig([]string{"lookback", src}, nil); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+	}
+}
+
 func apiSchemes(w http.ResponseWriter, r *http.Request) {
 	api.ResponseJSON(w, SupportedSchemes())
 }

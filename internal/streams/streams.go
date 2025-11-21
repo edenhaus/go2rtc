@@ -13,9 +13,10 @@ import (
 
 func Init() {
 	var cfg struct {
-		Streams map[string]any    `yaml:"streams"`
-		Publish map[string]any    `yaml:"publish"`
-		Preload map[string]string `yaml:"preload"`
+		Streams  map[string]any    `yaml:"streams"`
+		Publish  map[string]any    `yaml:"publish"`
+		Preload  map[string]string `yaml:"preload"`
+		Lookback map[string]string `yaml:"lookback"`
 	}
 
 	app.LoadConfig(&cfg)
@@ -29,9 +30,10 @@ func Init() {
 	api.HandleFunc("api/streams", apiStreams)
 	api.HandleFunc("api/streams.dot", apiStreamsDOT)
 	api.HandleFunc("api/preload", apiPreload)
+	api.HandleFunc("api/lookback", apiLookback)
 	api.HandleFunc("api/schemes", apiSchemes)
 
-	if cfg.Publish == nil && cfg.Preload == nil {
+	if cfg.Publish == nil && cfg.Preload == nil && cfg.Lookback == nil {
 		return
 	}
 
@@ -45,6 +47,11 @@ func Init() {
 		for name, rawQuery := range cfg.Preload {
 			if stream := Get(name); stream != nil {
 				Preload(stream, rawQuery)
+			}
+		}
+		for name, seconds := range cfg.Lookback {
+			if stream := Get(name); stream != nil {
+				Lookback(stream, seconds)
 			}
 		}
 	})
